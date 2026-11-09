@@ -1,18 +1,25 @@
 #include "max7219.h"
+#include "font.h"
+
+// DEBUG
+#include "../AVR_Atmega328p_Core/UART.h"
+#include "../NumToStr/nts.h"
+#include <stdint.h>
+#include <string.h>
+// END DEBUG
 
 /*-------------------HAL LEVEL-----------------*/
 /**
  * @brief function to send 1 byte via SPI
  * @param data -> data byte
- * @retval MAX7219_OK -> ok\
- * MAX7219_TO -> spi timeout\
+ * @retval max7219_status_t
  */
-max7219_state_t MAX7219_SPI_TX(uint8_t data) {
+max7219_status_t MAX7219_SPI_TX(uint8_t data) {
     uint32_t cnt = 0;
     SPDR = data;
     while (!(SPSR & (1 << SPIF))) {
         // emergency exit
-        if (cnt++ > MAX7219_SPI_TIMEOUT){
+        if (cnt++ > MAX7219_SPI_TIMEOUT) {
             return MAX7219_TO;
         }
     };
@@ -23,36 +30,22 @@ max7219_state_t MAX7219_SPI_TX(uint8_t data) {
  * @brief function to send buffer via SPI
  * @param data_buf[in] -> data buffer pointer
  * @param size -> size of data buffer
- * @retval MAX7219_OK -> ok\
- * MAX7219_TO -> spi timeout\
- * MAX7219_EP -> empty pointer
+ * @retval max7219_status_t
  */
-max7219_state_t MAX7219_SPI_TX_Buf(const uint8_t *data_buf, uint8_t size) {
+max7219_status_t MAX7219_SPI_TX_Buf(const uint8_t *data_buf, uint8_t size) {
     MAX7219_MACR_CHECK_PTR(data_buf, return MAX7219_EP);
     uint32_t cnt;
-    for (uint8_t i = size; i > 0; i++) {
+    for (uint8_t i = 0; i < size; i++) {
         cnt = 0;
-        SPDR = *data_buf;
+        SPDR = data_buf[i];
         while (!(SPSR & (1 << SPIF))) {
             // emergency exit
-            if (cnt++ > MAX7219_SPI_TIMEOUT){
+            if (cnt++ > MAX7219_SPI_TIMEOUT) {
                 return MAX7219_TO;
             }
         };
     }
     return MAX7219_OK;
-}
-
-void MAX7219_SPI_Init(void) {
-    // GPIO setting
-    MAX7219_MOSI_PIN_TO_OUTPUT(); // pin data to output
-    MAX7219_CS_PIN_TO_OUTPUT();   // pin load to output
-    MAX7219_CLK_PIN_TO_OUTPUT();  // pin clock to output
-    MAX7219_CS_PIN_1();           // cs high - switch spi to master mode
-
-    // SPI setting
-    SPCR = (1 << SPE) | (1 << MSTR) | (1 << SPR0);
-    SPSR |= (1 << SPI2X);
 }
 
 /*-----------------DRIVER LEVEL----------------*/
@@ -61,201 +54,232 @@ void MAX7219_SPI_Init(void) {
  * @param reg -> MAX7219 register
  * @param data -> data to write
  * @param struc [in/out] -> max7219 configure structure
+ * @retval max7219_status_t
  */
-void MAX7219_WriteReg(uint8_t reg, uint8_t data, max7219_t *struc) {
-    MAX7219_MACR_CHECK_PTR(struc, return);
-    max7219_state_t err = 0;
+static max7219_status_t MAX7219_WriteReg(uint8_t reg, uint8_t data,
+                                         max7219_t *struc) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
+    max7219_status_t err;
+    uint8_t frame[] = {reg, data};
 
-    *struc->cs_port &= ~(1 << struc->cs_pin); // cs low
-    err |= MAX7219_MACR_SPI_TX(reg);
-    err |= MAX7219_MACR_SPI_TX(data);
-    *struc->cs_port |= (1 << struc->cs_pin); // cs high
-    if (err != MAX7219_OK) {
-        MAX7219_MACR_WRITE_ERR(struc, MAX7219_ERR_SPI_TIMEOUT);
+    MAX7219_PIN_0(*struc->cs_port, struc->cs_pin);
+    err = MAX7219_SPI_TX_Buf(frame, 2);
+    MAX7219_PIN_1(*struc->cs_port, struc->cs_pin);
+    return err;
+}
+
+/**
+ * @brief function to initialize MAX7219
+ * @param struc [in/out] -> max7219 configure structure
+ * @retval max7219_status_t
+ */
+max7219_status_t MAX7219_Init(max7219_t *struc) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
+    max7219_status_t err;
+
+    // max7219 doesnt suppurt more that 7 symbols
+    if (MAX7219_SYMB_QUANT > 7) {
+        return MAX7219_SE;
     }
+    // scan limit ->number of digits 6 digits
+    err |= MAX7219_WriteReg(MAX7219_REG_SCAN_LIMIT, MAX7219_SYMB_QUANT, struc);
+    // no decode, use own font
+    err |= MAX7219_WriteReg(MAX7219_REG_DECODE, 0, struc);
+    // normal mode, Shut down mode OFF
+    err |= MAX7219_WriteReg(MAX7219_REG_SHUTDOWN, 1, struc);
+    // normal  mode, test mode OFF
+    err |= MAX7219_WriteReg(MAX7219_REG_DISPLAY_TEST, 0, struc);
+    err |= MAX7219_ClearDisp(struc);
+    err |= MAX7219_SetBright(struc);
+    return err;
 }
 
 /**
  * @brief function to change dislpay brightness
- * @param intensity from 0 to 8
+ * brighness is a number from 0 to 8
  * @param struc [in/out] -> max7219 configure structure
+ * @retval max7219_status_t
  */
-void MAX7219_SetIntensity(uint8_t intensity, max7219_t *struc) {
-    MAX7219_MACR_CHECK_PTR(struc, return);
-    if (intensity > 8) {
-        intensity = 8;
+max7219_status_t MAX7219_SetBright(max7219_t *struc) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
+    if (struc->bright > 8) {
+        struc->bright = 8;
     }
-    MAX7219_WriteReg(MAX7219_REG_INTENSITY, intensity, struc);
+    return MAX7219_WriteReg(MAX7219_REG_INTENSITY, struc->bright, struc);
 }
 
 /**
- * @brief function to initialize AVR and MAX7219 periphery
+ * @brief function to flush the buffer to the display
  * @param struc [in/out] -> max7219 configure structure
+ * @retval max7219_status_t
  */
-void MAX7219_Init(max7219_t *struc) {
-    MAX7219_MACR_CHECK_PTR(struc, return);
+max7219_status_t MAX7219_Flush(max7219_t *struc) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
+    uint8_t bar = 0;
+    max7219_status_t err;
 
-    MAX7219_MACR_SPI_INIT();
-    if (MAX7219_DIGITS_QUANT - 1 > 7) {
-        MAX7219_MACR_WRITE_ERR(struc, MAX7219_ERR_DIGIT_QUANT);
-        return;
+    if (struc->bar_rate > 6) {
+        struc->bar_rate = 6;
     }
-    // scan limit ->number of digits 6 digits
-    MAX7219_WriteReg(MAX7219_REG_SCAN_LIMIT, (MAX7219_DIGITS_QUANT - 1), struc);
-    MAX7219_WriteReg(MAX7219_REG_DECODE, 0, struc); // no decode, use own font
-    MAX7219_WriteReg(MAX7219_REG_SHUTDOWN, 1,
-                     struc); // normal mode, Shut down mode OFF
-    MAX7219_WriteReg(MAX7219_REG_DISPLAY_TEST, 0,
-                     struc); // normal  mode, test mode OFF
-    MAX7219_SetIntensity(MAX7219_INTENSITY, struc);
-    MAX7219_Clear(struc);
-    //__CLEARDISPLAY
+    for (uint8_t i = 0; i < struc->bar_rate; i++) {
+        bar |= 2 | 2 << i;
+    }
+    err |= MAX7219_WriteReg(6, struc->buf[4], struc);
+    err |= MAX7219_WriteReg(5, struc->buf[3], struc);
+    err |= MAX7219_WriteReg(4, struc->buf[2], struc);
+    err |= MAX7219_WriteReg(3, struc->buf[1], struc);
+    err |= MAX7219_WriteReg(2, struc->buf[0], struc);
+    err |= MAX7219_WriteReg(1, bar, struc);
+
+    // write dot
+    if (struc->dot_loc > MAX7219_SYMB_QUANT - 1) {
+        struc->dot_loc = MAX7219_SYMB_QUANT - 1;
+    }
+    err |= MAX7219_WriteReg(struc->dot_loc, 0x80, struc);
+
+    return err;
 }
 
 /**
- * @brief function flush the buffer to the display
+ * @brief clear display
  * @param struc [in/out] -> max7219 configure structure
+ * @retval max7219_status_t
  */
-void MAX7219_Flush(max7219_t *struc) {
-    MAX7219_MACR_CHECK_PTR(struc, return);
-    uint8_t bar = 0;
+max7219_status_t MAX7219_ClearDisp(max7219_t *struc) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
+    max7219_status_t err;
 
-    MAX7219_WriteReg(6, (uint8_t)struc->buf[4], struc);
-    MAX7219_WriteReg(5, (uint8_t)struc->buf[3], struc);
-    MAX7219_WriteReg(4, (uint8_t)struc->buf[2], struc);
-    MAX7219_WriteReg(3, (uint8_t)struc->buf[1], struc);
-    MAX7219_WriteReg(2, (uint8_t)struc->buf[0], struc);
-    for (uint8_t i = 0; i < struc->bar_rate; i++) {
-        bar |= 2 | 2 << i;
-    }
-    MAX7219_WriteReg(1, bar, struc);
+    err |= MAX7219_WriteReg(6, 0, struc);
+    err |= MAX7219_WriteReg(5, 0, struc);
+    err |= MAX7219_WriteReg(4, 0, struc);
+    err |= MAX7219_WriteReg(3, 0, struc);
+    err |= MAX7219_WriteReg(2, 0, struc);
+    return err;
 }
 
-void MAX7219_Clear(max7219_t *struc) {
-    MAX7219_MACR_CHECK_PTR(struc, return);
-    uint8_t bar = 0;
+/**
+ * @brief clear display buffer
+ * @param struc [in/out] -> max7219 configure structure
+ * @retval max7219_status_t
+ */
+max7219_status_t MAX7219_ClearBuf(max7219_t *struc) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
 
-    MAX7219_WriteReg(6, 0, struc);
-    MAX7219_WriteReg(5, 0, struc);
-    MAX7219_WriteReg(4, 0, struc);
-    MAX7219_WriteReg(3, 0, struc);
-    MAX7219_WriteReg(2, 0, struc);
-    for (uint8_t i = 0; i < struc->bar_rate; i++) {
-        bar |= 2 | 2 << i;
+    for (uint8_t i = 0; i < MAX7219_SYMB_QUANT; i++) {
+        struc->buf[i] = 0;
     }
-    MAX7219_WriteReg(1, bar, struc);
+    return MAX7219_OK;
 }
 
-uint8_t MAX7219_GetErr(max7219_t *struc) {
-    if (struc == 0) {
-        return 1 << MAX7219_ERR_EMPTY_PTR;
+/**
+ * @brief fill the driver buffer with the given string
+ * @param struc [in/out] -> max7219 configure structure
+ * @param str pointer to the string
+ * @retval max7219_status_t
+ */
+max7219_status_t MAX7219_PushStr(max7219_t *struc, const uint8_t *str) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
+    MAX7219_MACR_CHECK_PTR(str, return MAX7219_EP);
+
+    uint8_t font_ptr;
+
+    // convert ANSI to the font table
+    for (uint8_t i = 0; i < MAX7219_SYMB_QUANT; i++) {
+        font_ptr = str[i] - 32;
+        if (font_ptr > 58) {
+            return MAX7219_SE;
+        }
+#ifdef MAX7219_ARCH_AVR
+        struc->buf[i] = pgm_read_byte(&sev_seg_font[font_ptr]);
+#elif MAX7219_ARCH_STM32
+        struc->buf[i] = sev_seg_font[font_ptr];
+#endif
     }
-    return struc->err;
+    return MAX7219_OK;
 }
 
-/* void MAX7219_ClearDisplay(void) {
-  for (char i = 0; i < 8; i++)
-    MAX7219_WriteReg(i, 0x00);
-} */
+/**
+ * @brief function to push runnig string to the output buffer
+ * @param struc [in/out] -> max7219 configure structure
+ * @param rstruct [in/out] -> runnig string structure
+ * @retval max7219_status_t
+ */
+max7219_status_t MAX7219_RunStr(max7219_t *struc, max7219_run_str_t *rs_struc) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
+    MAX7219_MACR_CHECK_PTR(rs_struc, return MAX7219_EP);
 
-/* void MAX7219_RunString(uint8_t *str, uint8_t size, int8_t ms) {
-  char str_buf[size + 10]; // temporary buffer for running string
-  uint8_t str_ptr = 0;
-
-  for (char i = 0; i < 5; i++) { // add empty cells
-    str_buf[i] = _EMPTY;
-  }
-  for (char i = 0; i < size; i++) { // add string body
-    str_buf[i + 5] = str[i];
-  }
-  for (char i = size + 5; i < size + 10; i++) { // add empty cells
-    str_buf[i] = _EMPTY;
-  }
-
-  while (str_ptr < size + 6) { // blocking function
-    display_buf[4] = str_buf[str_ptr];
-    display_buf[3] = str_buf[str_ptr + 1];
-    display_buf[2] = str_buf[str_ptr + 2];
-    display_buf[1] = str_buf[str_ptr + 3];
-    display_buf[0] = str_buf[str_ptr + 4];
-    MAX7219_Show();
-    _delay_ms(MAX7219_RUN_STR_DELAY);
-    str_ptr++;
-  }
-} */
-
-/* uint16_t fastPow10(uint8_t exp) { // fast 10^x (for MAX7219_Float)
-  switch (exp) {
-  case 1:
-    return 10;
-  case 2:
-    return 100;
-  case 3:
-    return 1000;
-  }
-  return 1;
-} */
-
-/* void MAX7219_Int(int num) {
-  bool sign_flag = 0;
-  if (num < 0) {
-    sign_flag = 1;
-    num *= (-1); // change to positive and rise negative flag
-  }
-  if (num > (sign_flag ? 9999 : 99999)) {
-    MAX7219_Text(_EMPTY, _EMPTY, _O, _U, _F);
-    return;
-  } else {
-    display_buf[0] = digits_array[(num % 10)];
-    if (sign_flag)
-      display_buf[1] = _DASH;
-    if (num > 9) {
-      display_buf[1] = digits_array[(num % 100) / 10];
-      if (sign_flag)
-        display_buf[2] = _DASH;
+    // await
+    if (rs_struc->shift_fl) {
+        rs_struc->shift_fl = 0;
+    } else {
+        return MAX7219_OK;
     }
-    if (num > 99) {
-      display_buf[2] = digits_array[(num % 1000) / 100];
-      if (sign_flag)
-        display_buf[3] = _DASH;
+
+    static uint8_t step;                         // shift steps
+    uint8_t len = strlen((char *)rs_struc->str); // string length
+    uint8_t total_len; // total length of string + symbols
+    total_len = len + MAX7219_SYMB_QUANT * 2 + 1;
+    uint8_t font_ptr; // font pointer
+    uint8_t iter;     // array iterator
+
+    // stack overflow protection
+    if (total_len > MAX7219_RUN_STR_MAX_LEN) {
+        return MAX7219_SE;
     }
-    if (num > 999) {
-      display_buf[3] = digits_array[(num % 10000) / 1000];
-      if (sign_flag)
-        display_buf[4] = _DASH;
+
+    uint8_t buf[len + MAX7219_SYMB_QUANT * 2 + 1];
+
+    // new running string start procedure
+    if (rs_struc->start_fl) {
+        step = 0;
+        rs_struc->start_fl = 0;
+        rs_struc->finish_fl = 0;
     }
-    if (num > 9999)
-      display_buf[4] = digits_array[(num % 100000) / 10000];
-  }
+
+    // fill the buffer with epmty fileds from right and left sides
+    for (uint8_t i = 0; i < MAX7219_SYMB_QUANT; i++) {
+        buf[iter++] = ' ';
+    }
+    for (uint8_t i = 0; i < len; i++) {
+        buf[iter++] = rs_struc->str[i];
+    }
+    for (uint8_t i = 0; i < MAX7219_SYMB_QUANT; i++) {
+        buf[iter++] = ' ';
+    }
+
+    // slice the buffer to fit in the display
+    if ((++step) + MAX7219_SYMB_QUANT < total_len) {
+        // NO BUS FAULT - NO WRITE. ONLY READ (buf + step)
+        memcpy(struc->buf, buf + step, MAX7219_SYMB_QUANT);
+    } else {
+        rs_struc->finish_fl = 1;
+    }
+
+    // convert ANSI to the font table
+    for (uint8_t i = 0; i < MAX7219_SYMB_QUANT; i++) {
+        font_ptr = struc->buf[i] - 32;
+        if (font_ptr > 58) {
+            return MAX7219_SE;
+        }
+#ifdef MAX7219_ARCH_AVR
+        struc->buf[i] = pgm_read_byte(&sev_seg_font[font_ptr]);
+#elif MAX7219_ARCH_STM32
+        struc->buf[i] = sev_seg_font[font_ptr];
+#endif
+    }
+
+    return MAX7219_OK;
 }
-*/
-/*
-void MAX7219_Uint(int16_t num) {
-  if (num > 9999) {
-    MAX7219_Text(_EMPTY, _EMPTY, _O, _U, _F);
-    return;
-  } else {
-    display_buf[0] = digits_array[(num % 10)];
-    if (num > 9)
-      display_buf[1] = digits_array[(num % 100) / 10];
-    if (num > 99)
-      display_buf[2] = digits_array[(num % 1000) / 100];
-    if (num > 999)
-      display_buf[3] = digits_array[(num % 10000) / 1000];
-    if (num > 9999)
-      display_buf[4] = digits_array[(num % 100000) / 10000];
-  }
-} */
-/*
-void MAX7219_Text(uint8_t d1, uint8_t d2, uint8_t d3, uint8_t d4, uint8_t d5) {
-  if (d1 > 0)
-    display_buf[4] = d1;
-  if (d2 > 0)
-    display_buf[3] = d2;
-  if (d3 > 0)
-    display_buf[2] = d3;
-  if (d4 > 0)
-    display_buf[1] = d4;
-  if (d5 > 0)
-    display_buf[0] = d5;
-} */
+
+/**
+ * @brief locate the dot at the output buffer
+ * @param struc [in/out] -> max7219 configure structure
+ * @retval max7219_status_t
+ */
+inline max7219_status_t MAX7219_LocateDot(max7219_t *struc, uint8_t dot_loc) {
+    MAX7219_MACR_CHECK_PTR(struc, return MAX7219_EP);
+
+    struc->dot_loc = dot_loc;
+
+    return MAX7219_OK;
+}
