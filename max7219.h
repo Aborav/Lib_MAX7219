@@ -97,8 +97,8 @@ extern "C" {
 typedef enum {
     MAX7219_OK = 0,
     MAX7219_TO = 0b1,
-    MAX7219_EP = 0b01,
-    MAX7219_SE = 0b001
+    MAX7219_EP = 0b10,
+    MAX7219_SE = 0b100
 } max7219_status_t;
 
 /**
